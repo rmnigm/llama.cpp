@@ -435,6 +435,32 @@ static void test_decision_escape(testing & t) {
     });
 }
 
+static void test_reuse_spans(testing & t) {
+    const llama_tokens old = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    const llama_tokens reordered = {1, 2, 7, 8, 9, 3, 4, 5, 6, 10};
+    const auto spans = server_find_reuse_spans(old, reordered, 2, 3);
+    t.assert_equal("two disjoint spans", (size_t) 2, spans.size());
+    t.assert_equal("longest first", 4, spans[0].len);
+    t.assert_equal("moved right", 5, spans[0].dst);
+    t.assert_equal("moved left", 2, spans[1].dst);
+    t.assert_true("minimum length", server_find_reuse_spans(old, reordered, 2, 5).empty());
+    t.assert_true("empty prompt", server_find_reuse_spans(old, {}, 0, 1).empty());
+    t.assert_true("logits token excluded", server_find_reuse_spans({1}, {1}, 0, 1).empty());
+    const auto threshold = server_find_reuse_spans({1, 2, 3}, {9, 1, 2, 3}, 0, 3);
+    t.assert_equal("threshold before logits trim", (size_t) 1, threshold.size());
+    t.assert_equal("final token trimmed", 2, threshold[0].len);
+
+    llama_tokens many_old;
+    llama_tokens many_new;
+    for (int i = 0; i < 7; ++i) {
+        many_old.insert(many_old.end(), {3*i, 3*i + 1, 3*i + 2});
+        many_new.insert(many_new.end(), {3*i, 3*i + 1, 3*i + 2, 100});
+    }
+    t.assert_equal("six span cap", (size_t) 6, server_find_reuse_spans(many_old, many_new, 0, 3).size());
+    t.assert_true("bounded repeated-token search",
+            server_find_reuse_spans(llama_tokens(3000, 1), llama_tokens(3000, 1), 0, 4).empty());
+}
+
 int main(int argc, char ** argv) {
     testing t;
 
@@ -454,6 +480,7 @@ int main(int argc, char ** argv) {
     t.test("lora_helpers",  test_lora_helpers);
     t.test("server_pipe",   test_server_pipe);
     t.test("decision_escape", test_decision_escape);
+    t.test("reuse_spans",   test_reuse_spans);
 
     return t.summary();
 }

@@ -304,6 +304,7 @@ struct server_slot {
     slot_state state = SLOT_STATE_IDLE;
 
     server_prompt prompt;
+    std::vector<server_reuse_span> reused_spans;
 
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
@@ -402,6 +403,7 @@ struct server_slot {
 
         // note: callback_on_reset() must have run before this, see release()
         stats = {};
+        reused_spans.clear();
         n_accepted_per_pos.clear();
 
         n_predict_max = -1;
@@ -3739,7 +3741,7 @@ private:
                                 }
 
                                 // reuse chunks from the cached prompt by shifting their KV cache in the new position
-                                if (can_cache_reuse && n_cache_reuse > 0) {
+                                if (!params_base.cache_reuse_scr && can_cache_reuse && n_cache_reuse > 0) {
                                     GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
 
                                     size_t head_c = n_past; // cache
@@ -3935,7 +3937,44 @@ private:
                         slot.stats.n_prompt_cached    = n_past;
                         slot.stats.n_prompt_processed = 0;
 
-                        metrics.add_prompt_cached(n_past);
+                        const bool can_scr = params_base.cache_reuse_scr && slot.task->params.n_cache_reuse > 0 &&
+                                slot.task->params.cache_prompt && slot.task->type == SERVER_TASK_TYPE_COMPLETION &&
+                                slot.task->n_tokens_shared == 0 && !slot.task->is_stateless() &&
+                                !mctx && !input_tokens.has_mtmd && !slot.prompt.tokens.has_mtmd &&
+                                !spec && slot.lora.empty() && n_swa == 0 &&
+                                (!params_base.kv_unified || slots.size() == 1) &&
+                                ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART &&
+                                llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
+                                llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id) == 0;
+                        if (can_scr) {
+                            slot.reused_spans = server_find_reuse_spans(slot.prompt.tokens.get_tokens(),
+                                    input_tokens.get_tokens(), n_past, slot.task->params.n_cache_reuse);
+                            if (!slot.reused_spans.empty()) {
+                                std::sort(slot.reused_spans.begin(), slot.reused_spans.end(),
+                                        [](const auto & a, const auto & b) { return a.src < b.src; });
+                                int32_t end = n_past;
+                                for (const auto & span : slot.reused_spans) {
+                                    slot.mem.seq_rm(slot.id, end, span.src);
+                                    end = span.src + span.len;
+                                }
+                                slot.mem.seq_rm(slot.id, end, -1);
+
+                                // Park beyond both prompts so neither move can touch another span.
+                                const int32_t offset = std::max(slot.prompt.n_tokens(), slot.task->n_tokens());
+                                for (const auto & span : slot.reused_spans) {
+                                    slot.mem.seq_add(slot.id, span.src, span.src + span.len, offset);
+                                }
+                                for (const auto & span : slot.reused_spans) {
+                                    slot.mem.seq_add(slot.id, offset + span.src, offset + span.src + span.len,
+                                            span.dst - span.src - offset);
+                                    slot.stats.n_reused_shift += span.len;
+                                }
+                                slot.stats.n_spans_relocated = slot.reused_spans.size();
+                                slot.stats.n_prompt_cached += slot.stats.n_reused_shift;
+                            }
+                        }
+
+                        metrics.add_prompt_cached(slot.stats.n_prompt_cached);
 
                         slot.prompt.tokens.keep_first(n_past);
 
@@ -3967,7 +4006,9 @@ private:
 
                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
+                    if (slot.reused_spans.empty()) {
+                        slot.mem.seq_rm(slot.id, p0, -1);
+                    }
 
                     // shared prompt prefix: once it is processed, the children continue from it with their own prompt
                     bool wait_shared = false;
@@ -4005,6 +4046,7 @@ private:
 
                     // make checkpoints only for completion tasks
                     do_checkpoint = do_checkpoint && slot.task->type == SERVER_TASK_TYPE_COMPLETION;
+                    do_checkpoint = do_checkpoint && slot.reused_spans.empty();
 
                     // make a checkpoint of the parts of the memory that cannot be rolled back.
                     // checkpoints are created only if:
@@ -4075,6 +4117,13 @@ private:
 
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
+                        const auto pos = slot.prompt.n_tokens();
+                        const auto reused = std::find_if(slot.reused_spans.begin(), slot.reused_spans.end(),
+                                [pos](const auto & span) { return pos >= span.dst && pos < span.dst + span.len; });
+                        if (reused != slot.reused_spans.end()) {
+                            slot.prompt.tokens.push_back(input_tokens[pos]);
+                            continue;
+                        }
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {

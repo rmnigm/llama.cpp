@@ -399,6 +399,12 @@ bool llama_batch_allocr::init(
 
             const llama_pos p0 = mem ? mem->seq_pos_max(s) : -1;
 
+            const bool discontinuous = (p0 >= 0 && seq_pos_min(s) != p0 + 1) ||
+                    seq_pos_max(s) - seq_pos_min(s) + 1 > (int) seq_pos[s].size();
+            if (discontinuous && mem && mem->seq_can_fill(s, seq_pos[s])) {
+                continue;
+            }
+
             if (p0 >= 0) {
                 bool ok = true;
 

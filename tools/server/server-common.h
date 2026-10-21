@@ -387,6 +387,16 @@ json format_response_rerank(
         std::vector<std::string> & texts,
         int top_n);
 
+struct server_reuse_span {
+    int32_t src;
+    int32_t dst;
+    int32_t len;
+};
+
+// Selects outside the common prefix, then excludes the final destination token needed for logits.
+std::vector<server_reuse_span> server_find_reuse_spans(
+        const llama_tokens & cached, const llama_tokens & prompt, int32_t n_prefix, int32_t min_span);
+
 //
 // stats and metrics
 //

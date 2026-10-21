@@ -220,6 +220,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--threads-http N` | number of threads used to process HTTP requests (default: -1)<br/>(env: LLAMA_ARG_THREADS_HTTP) |
 | `--cache-prompt, --no-cache-prompt` | whether to enable prompt caching (default: enabled)<br/>(env: LLAMA_ARG_CACHE_PROMPT) |
 | `--cache-reuse N` | min chunk size to attempt reusing from the cache via KV shifting, requires prompt caching to be enabled (default: 0)<br/>[(card)](https://ggml.ai/f0.png)<br/>(env: LLAMA_ARG_CACHE_REUSE) |
+| `--cache-reuse-mode greedy\|scr` | cache reuse algorithm: greedy or up to 6 disjoint matching spans (scr); requires `--cache-reuse` (default: greedy)<br/>(env: LLAMA_ARG_CACHE_REUSE_MODE) |
 | `--metrics` | enable prometheus compatible metrics endpoint (default: disabled)<br/>(env: LLAMA_ARG_ENDPOINT_METRICS) |
 | `--props` | enable changing global properties via POST /props (default: disabled)<br/>(env: LLAMA_ARG_ENDPOINT_PROPS) |
 | `--slots, --no-slots` | expose slots monitoring endpoint (default: enabled)<br/>(env: LLAMA_ARG_ENDPOINT_SLOTS) |
@@ -537,6 +538,10 @@ By default, this value is set to `0`, meaning no tokens are kept. Use `-1` to re
 `n_cmpl`: Number of completions to generate from the current prompt. If input has multiple prompts, the output will have N prompts times `n_cmpl` entries.
 
 `n_cache_reuse`: Min chunk size to attempt reusing from the cache via KV shifting. For more info, see `--cache-reuse` arg. Default: `0`, which is disabled.
+
+With `--cache-reuse-mode scr`, the server selects up to six longest disjoint token runs after the common prefix, including reordered runs. It relocates their KV and evaluates the remaining tokens. The final prompt token is always evaluated for logits. Reused KV retains the old context's influence, so outputs can differ from a full prefill.
+
+SCR supports text completion with full attention KV, shiftable RoPE, and full-size SWA storage (`--swa-full`) when applicable. Speculative decoding, adapters, shared prompt batches, and unified KV with multiple slots fall back to prefix/checkpoint processing. Matching stops after 8,388,608 candidate comparisons and falls back before changing KV. Keep requests for one conversation on the same slot; this mode adds no session API.
 
 `stream`: Allows receiving each predicted token in real-time instead of waiting for the completion to finish (uses a different response format). To enable this, set to `true`.
 
@@ -1450,6 +1455,8 @@ The response contains a `timings` object, for example:
 This provides information on the performance of the server. It also allows calculating the current context usage.
 
 The total number of tokens in context is equal to `prompt_n + cache_n + predicted_n`
+
+Completion timings also contain `n_reused_prefix`, `n_reused_shift`, `n_prefilled`, and `n_spans_relocated`. Prefix plus shifted plus prefilled tokens equals the prompt length; `cache_n` is prefix plus shifted tokens, and `prompt_n` equals `n_prefilled`. Shifted reuse includes selected runs with zero position delta. `prompt_ms` includes matching, relocation, and prompt evaluation. One `clm_reuse` JSON log record per completed request carries these fields, `prompt_ms`, and `id_slot`.
 
 The response also includes a standard `usage` object:
 

@@ -17,6 +17,7 @@
 #include <type_traits>
 #include <chrono>
 #include <thread>
+#include <unordered_map>
 
 #ifdef _WIN32
 // windows.h defines min and max as macros, which breaks std::min and std::max
@@ -75,6 +76,69 @@ json format_error_response(const std::string & message, const enum error_type ty
         {"message", message},
         {"type", type_str},
     };
+}
+
+std::vector<server_reuse_span> server_find_reuse_spans(
+        const llama_tokens & cached, const llama_tokens & prompt, int32_t n_prefix, int32_t min_span) {
+    GGML_ASSERT(min_span > 0);
+    const int32_t n_old = cached.size();
+    const int32_t n_new = prompt.size();
+    std::unordered_map<llama_token, std::vector<int32_t>> positions;
+    for (int32_t c = n_prefix; c < n_old; ++c) {
+        positions[cached[c]].push_back(c);
+    }
+
+    std::vector<bool> used_old(n_old, false);
+    std::vector<bool> used_new(prompt.size(), false);
+    std::vector<server_reuse_span> spans;
+    size_t comparisons = 0;
+    constexpr size_t max_comparisons = 8 * 1024 * 1024;
+    constexpr size_t max_spans = 6;
+
+    while (spans.size() < max_spans) {
+        std::vector<int32_t> lengths(n_old, 0);
+        std::vector<int32_t> rows(n_old, -2);
+        server_reuse_span best = {0, 0, 0};
+        for (int32_t p = n_prefix; p < n_new; ++p) {
+            if (used_new[p]) {
+                continue;
+            }
+            const auto it = positions.find(prompt[p]);
+            if (it == positions.end()) {
+                continue;
+            }
+            // Descending source positions keep the preceding row intact in-place.
+            for (auto c = it->second.rbegin(); c != it->second.rend(); ++c) {
+                if (++comparisons > max_comparisons) {
+                    return {}; // no KV has been changed; use the common prefix only
+                }
+                if (used_old[*c]) {
+                    continue;
+                }
+                const int32_t len = *c > n_prefix && rows[*c - 1] == p - 1 ? lengths[*c - 1] + 1 : 1;
+                lengths[*c] = len;
+                rows[*c] = p;
+                const server_reuse_span candidate = {*c - len + 1, p - len + 1, len};
+                if (len > best.len || (len == best.len &&
+                        std::make_pair(candidate.src, candidate.dst) < std::make_pair(best.src, best.dst))) {
+                    best = candidate;
+                }
+            }
+        }
+        if (best.len < min_span) {
+            break;
+        }
+        spans.push_back(best);
+        std::fill_n(used_old.begin() + best.src, best.len, true);
+        std::fill_n(used_new.begin() + best.dst, best.len, true);
+    }
+    for (auto & span : spans) {
+        if (span.dst + span.len == n_new) {
+            --span.len;
+        }
+    }
+    spans.erase(std::remove_if(spans.begin(), spans.end(), [](const auto & span) { return span.len == 0; }), spans.end());
+    return spans;
 }
 
 //

@@ -1228,6 +1228,29 @@ uint32_t llama_kv_cache::get_n_seq_max() const {
     return n_seq_max;
 }
 
+bool llama_kv_cache::seq_can_fill(llama_seq_id seq_id, const std::set<llama_pos> & positions) const {
+    if (other) {
+        return other->seq_can_fill(seq_id, positions);
+    }
+    if (!get_can_shift() || positions.empty()) {
+        return false;
+    }
+    const auto & cells = v_cells[seq_to_stream[seq_id]];
+    std::vector<llama_pos> combined(positions.begin(), positions.end());
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        if (cells.seq_has(i, seq_id) && cells.pos_get(i) <= *positions.rbegin()) {
+            combined.push_back(cells.pos_get(i));
+        }
+    }
+    std::sort(combined.begin(), combined.end());
+    for (size_t i = 0; i < combined.size(); ++i) {
+        if (combined[i] != (llama_pos) i) {
+            return false;
+        }
+    }
+    return true;
+}
+
 uint32_t llama_kv_cache::get_n_stream() const {
     return n_stream;
 }

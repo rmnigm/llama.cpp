@@ -5,6 +5,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <functional>
 
 struct llama_ubatch;
@@ -116,6 +117,9 @@ struct llama_memory_i {
 
     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const = 0;
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
+
+    // Whether a batch fills holes without overwriting KV or leaving gaps before its last position.
+    virtual bool seq_can_fill(llama_seq_id, const std::set<llama_pos> &) const { return false; }
 
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
 

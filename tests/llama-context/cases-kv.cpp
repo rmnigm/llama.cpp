@@ -718,6 +718,48 @@ struct case_state_restore_fragmented : ctx_test {
     }
 };
 
+struct case_sparse_fill : ctx_test {
+    const char * name() const override { return "sparse_fill"; }
+    const char * description() const override { return "fill KV holes and reject overwrites or missing causal history"; }
+
+    case_result run(model_run & mr) const override {
+        ctx_opts opts;
+        opts.n_ctx = 256;
+        auto ctx = mr.ctx(opts);
+        CTX_REQUIRE(ctx, "context creation failed");
+        auto mem = llama_get_memory(ctx.get());
+        if (!llama_memory_can_shift(mem) || llama_model_is_recurrent(mr.model) || llama_model_is_hybrid(mr.model) ||
+                llama_model_n_swa(mr.model) > 0) {
+            return case_result::skip("requires a full attention cache with position shifting");
+        }
+        CTX_REQUIRE(mr.tokens.size() >= 17, "needs 17 tokens");
+        CTX_REQUIRE(decode_seq(ctx.get(), mr.tokens, 0, 17, 0, true), "reference decode failed");
+        std::vector<float> reference;
+        CTX_REQUIRE(get_current_logits(ctx.get(), reference), "missing reference logits");
+        CTX_REQUIRE(llama_memory_seq_rm(mem, 0, 4, 6), "cannot remove first gap");
+        CTX_REQUIRE(llama_memory_seq_rm(mem, 0, 10, 12), "cannot remove second gap");
+        CTX_REQUIRE(llama_memory_seq_rm(mem, 0, 16, -1), "cannot remove final token");
+
+        common_batch invalid(ctx.get());
+        invalid.add(mr.tokens[5], 5, 0, true);
+        CTX_REQUIRE(llama_process(ctx.get(), LLAMA_PROCESS_TYPE_DECODE, invalid.get()) != 0, "accepted missing position 4");
+        invalid.clear();
+        invalid.add(mr.tokens[3], 3, 0, true);
+        CTX_REQUIRE(llama_process(ctx.get(), LLAMA_PROCESS_TYPE_DECODE, invalid.get()) != 0, "accepted KV overwrite");
+
+        common_batch fill(ctx.get());
+        for (int p : {4, 5, 10, 11, 16}) {
+            fill.add(mr.tokens[p], p, 0, p == 16);
+        }
+        CTX_REQUIRE(llama_process(ctx.get(), LLAMA_PROCESS_TYPE_DECODE, fill.get()) == 0, "sparse decode failed");
+        std::vector<float> actual;
+        CTX_REQUIRE(get_current_logits(ctx.get(), actual), "missing sparse logits");
+        const auto diff = compare_logits(reference.data(), actual.data(), reference.size());
+        CTX_REQUIRE(diff.nmse() < NMSE_THRESHOLD, "sparse fill changed logits");
+        return case_result::pass();
+    }
+};
+
 std::vector<ctx_test_ptr> make_kv_cases() {
     std::vector<ctx_test_ptr> cases;
 
@@ -733,6 +775,7 @@ std::vector<ctx_test_ptr> make_kv_cases() {
     cases.push_back(std::make_unique<case_state_restore_failure>());
     cases.push_back(std::make_unique<case_state_rotation>());
     cases.push_back(std::make_unique<case_state_restore_fragmented>());
+    cases.push_back(std::make_unique<case_sparse_fill>());
 
     return cases;
 }

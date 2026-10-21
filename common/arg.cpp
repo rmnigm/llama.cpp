@@ -3610,6 +3610,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_REUSE"));
     add_opt(common_arg(
+        {"--cache-reuse-mode"}, "greedy|scr",
+        "cache reuse algorithm: greedy or up to 6 disjoint matching spans (scr); requires --cache-reuse (default: greedy)",
+        [](common_params & params, const std::string & value) {
+            if (value != "greedy" && value != "scr") {
+                throw std::invalid_argument("cache reuse mode must be greedy or scr");
+            }
+            params.cache_reuse_scr = value == "scr";
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_REUSE_MODE"));
+    add_opt(common_arg(
         {"--metrics"},
         string_format("enable prometheus compatible metrics endpoint (default: %s)", params.endpoint_metrics ? "enabled" : "disabled"),
         [](common_params & params) {
