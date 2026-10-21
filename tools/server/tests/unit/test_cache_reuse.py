@@ -15,6 +15,7 @@ def load_server_presets():
 @pytest.fixture
 def server(tmp_path, monkeypatch, reuse_mode, cache_type):
     monkeypatch.setenv("LLAMA_ARG_N_GPU_LAYERS", "0")
+    monkeypatch.setenv("LLAMA_ARG_DEVICE", "none")
     monkeypatch.setenv("LLAMA_ARG_CACHE_REUSE_MODE", reuse_mode)
     root = Path(__file__).resolve().parents[4]
     binary = Path(os.environ.get("LLAMA_SERVER_BIN_PATH", root / "build/bin/llama-server"))
