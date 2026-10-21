@@ -48,7 +48,7 @@ def cache_type(request):
     return request.param
 
 
-@pytest.mark.parametrize("edit", ["delete", "replace", "insert", "identical", "reorder", "gaps"])
+@pytest.mark.parametrize("edit", ["delete", "replace", "equal-replace", "insert", "identical", "reorder", "gaps"])
 def test_reuse_metrics(server, edit, reuse_mode):
     prefix = list(range(10, 30))
     middle = list(range(30, 40))
@@ -57,6 +57,7 @@ def test_reuse_metrics(server, edit, reuse_mode):
     edited = {
         "delete": prefix + suffix,
         "replace": [*prefix, 90, 91, 92, *suffix],
+        "equal-replace": prefix + [90] * len(middle) + suffix,
         "insert": [*prefix, 90, 91, 92, *middle, *suffix],
         "identical": base,
         "reorder": prefix + suffix + middle,
@@ -93,7 +94,13 @@ def test_reuse_metrics(server, edit, reuse_mode):
         assert timings["n_reused_shift"] == 0
         assert timings["n_prefilled"] == 1
     elif reuse_mode == "scr":
-        expected = {"replace": (39, 1, 4), "insert": (49, 1, 4), "reorder": (49, 2, 1), "gaps": (49, 2, 81)}
+        expected = {
+            "replace": (39, 1, 4),
+            "equal-replace": (39, 1, 11),
+            "insert": (49, 1, 4),
+            "reorder": (49, 2, 1),
+            "gaps": (49, 2, 81),
+        }
         shifted, spans, prefilled = expected[edit]
         assert timings["n_reused_prefix"] == len(prefix)
         assert timings["n_reused_shift"] == shifted
