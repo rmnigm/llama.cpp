@@ -395,6 +395,9 @@ json format_response_rerank(
 struct server_slot_stats {
     uint64_t n_prompt_cached    = 0;
     uint64_t n_prompt_processed = 0;
+    uint64_t n_reused_prefix    = 0;
+    uint64_t n_reused_shift     = 0;
+    uint64_t n_spans_relocated  = 0;
     uint64_t n_gen              = 0;
 
     // speculative decoding stats

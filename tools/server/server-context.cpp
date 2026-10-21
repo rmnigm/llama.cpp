@@ -2228,6 +2228,16 @@ private:
     }
 
     void send_final_response(server_slot & slot) {
+        const json reuse = {
+            {"id_slot", slot.id},
+            {"n_reused_prefix", slot.stats.n_reused_prefix},
+            {"n_reused_shift", slot.stats.n_reused_shift},
+            {"n_prefilled", slot.stats.n_prompt_processed},
+            {"n_spans_relocated", slot.stats.n_spans_relocated},
+            {"prompt_ms", slot.stats.t_prompt_ms()},
+        };
+        SLT_INF(slot, "clm_reuse %s\n", reuse.dump().c_str());
+
         auto res = std::make_unique<server_task_result_cmpl_final>();
 
         res->id      = slot.task->id;
@@ -3631,6 +3641,8 @@ private:
 
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
+                        int n_prefix_reused = 0;
+                        std::vector<int> relocated_starts;
 
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
@@ -3715,6 +3727,7 @@ private:
                                     n_past = std::min(n_past, slot.alora_invocation_start - 1);
                                 }
 
+                                n_prefix_reused = n_past;
                                 const auto n_cache_reuse = slot.task->params.n_cache_reuse;
 
                                 const bool can_cache_reuse =
@@ -3755,6 +3768,7 @@ private:
                                             //    SLT_DBG(slot, "cache token %3zu: %6d '%s'\n", i, prompt_tokens[i], common_token_to_piece(ctx_tgt, prompt_tokens[i]).c_str());
                                             //}
 
+                                            relocated_starts.push_back(head_p);
                                             const int64_t kv_shift = (int64_t) head_p - (int64_t) head_c;
 
                                             slot.mem.seq_rm (slot.id, head_p, head_c);
@@ -3914,6 +3928,10 @@ private:
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
+                        slot.stats.n_reused_prefix = std::min(n_prefix_reused, n_past);
+                        slot.stats.n_reused_shift = n_past - slot.stats.n_reused_prefix;
+                        slot.stats.n_spans_relocated = std::count_if(relocated_starts.begin(), relocated_starts.end(),
+                                [n_past](int start) { return start < n_past; });
                         slot.stats.n_prompt_cached    = n_past;
                         slot.stats.n_prompt_processed = 0;
 
