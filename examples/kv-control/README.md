@@ -48,6 +48,26 @@ reclaims reusable cells, not resident RAM; fixed tensor allocation stays constan
 Close releases context ownership but RSS can remain high. Per-KV resident bytes
 are unknown, not estimated from occupancy.
 
+## Allocation and active capacity checks
+
+`capacity_tokens` is a hard live-token admission limit, independent of the padded `allocated_capacity_tokens`. For example, a 17-token session allocates 256 engine cells on the current backend; spare allocated cells do not permit an 18th live token. Completion reserves the input delta plus the requested maximum output before any decode, including space for the final generated token. Absolute positions have a separate limit and do not measure occupied cells.
+
+The native `test-kv-control` exercises this distinction for F16 and q8_0 KV, using seeded llama/Qwen3 weights and quantized Qwen3 weights. It creates a 17-token session under the preflight allocation estimate, then runs 32 drop/reposition/refill cycles:
+
+| State | Occupied tokens | Reusable admitted tokens | Allocated cells |
+| --- | ---: | ---: | ---: |
+| Create | 0 | 17 | 256 |
+| Append 5-token anchor and 12-token tail | 17 | 0 | 256 |
+| Drop tail | 5 | 12 | 256 |
+| Reposition anchor | 5 | 12 | 256 |
+| Refill tail | 17 | 0 | 256 |
+
+Each cycle checks unchanged allocated KV bytes, exact rejection of over-capacity appends and repeated drops, engine positions, numerical translation drift, and an untouched second session. Across the run, 401 tokens are decoded into the 256-cell allocation while at most 17 remain live. The native test uses the compatibility position limit to cross the physical cell count; this does not change HTTP training-context bounds or establish extrapolation quality.
+
+Additional tests verify atomic generation rejection when the maximum output cannot fit, final-token storage and reuse, and a 65-token append split across 8-token batches and 4-token microbatches. The batched append still creates one span and advances the revision once; full-span drop and refill preserve its logits within the fixture tolerance.
+
+These checks establish cell reuse and bounded admission. They do not measure per-KV resident pages or process RSS: `resident_kv_bytes` remains null and `returned_to_os_bytes` remains zero for edits. Physical tensor shrinking, pageable allocation and a hard process/device-memory cap remain separate future work.
+
 Canonical protocol, errors, conformance and exact CPU/CUDA/Metal commands:
 [local_clm specification](https://github.com/rmnigm/local_clm/blob/clm/kv-control-hardening/specs/kv-control.md)
 and [runbook](https://github.com/rmnigm/local_clm/blob/clm/kv-control-hardening/wiki/runbooks/direct-kv-smoke.md).

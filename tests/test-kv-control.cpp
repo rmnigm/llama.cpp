@@ -62,6 +62,91 @@ static void reject(common_kv_session & s, const std::string & op, const common_j
     require(before == s.inspect().dump(), "rejection changed state");
 }
 
+static common_json generate(common_kv_session & s, const std::vector<llama_token> & tokens, int32_t max_tokens) {
+    const auto state = s.inspect();
+    common_params_sampling sampling;
+    sampling.temp = 0;
+    return s.generate({{"version", 1}, {"session", state.at("session")}, {"revision", state.at("revision")},
+                       {"op", "kv.generate"}, {"tokens", tokens}}, sampling, max_tokens);
+}
+
+static void test_active_capacity(llama_model * model, llama_context_params cp, size_t budget) {
+    cp.n_ctx = 17;
+    size_t estimate = 0;
+    require(llama_kv_control_preflight(model, cp, &estimate), "small-capacity allocation estimate failed");
+    require(estimate > 0 && estimate <= budget, "invalid small-capacity allocation estimate");
+    common_kv_session active(model, cp, 17, estimate);
+    common_kv_session isolated(model, cp, 17, budget);
+    const auto initial = active.inspect();
+    require(initial.at("allocated_capacity_tokens").get<uint32_t>() > initial.at("capacity_tokens").get<uint32_t>(), "test needs spare allocated cells");
+    const auto allocated = initial.at("allocated_kv_bytes");
+    require(allocated.get<size_t>() > 0, "missing allocated KV measurement");
+    require(allocated.get<size_t>() <= estimate, "allocation exceeded preflight estimate");
+    const auto anchor = append(active, {4, 5, 6, 7, 8}).at("spans").back().at("id");
+    append(isolated, {4, 5, 6, 7, 8});
+    const auto isolated_before = isolated.inspect();
+    const std::vector<llama_token> tail{9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+    auto state = append(active, tail);
+    const auto baseline = state.at("logits");
+    for (int i = 0; i < 32; ++i) {
+        require(state.at("occupied_tokens") == 17 && state.at("reusable_tokens") == 0, "active budget not filled");
+        reject(active, "kv.append", {{"tokens", std::vector<int>{21}}}, "invalid_tokens");
+        const auto dropped = state.at("spans").back().at("id");
+        state = call(active, "kv.drop", {{"span", dropped}});
+        require(state.at("occupied_tokens") == 5 && state.at("reusable_tokens") == 12, "drop did not restore active budget");
+        reject(active, "kv.drop", {{"span", dropped}}, "span_dropped");
+        state = call(active, "kv.reposition", {{"span", anchor}, {"position", (i + 1) * 257}});
+        require(state.at("occupied_tokens") == 5 && state.at("reusable_tokens") == 12, "reposition changed active capacity");
+        state = append(active, tail);
+        require(state.at("next_position") == (i + 1) * 257 + 17, "position limited by physical cell count");
+        require(state.at("engine_position_max") == state.at("next_position").get<int>() - 1, "engine position disagrees with spans");
+        require(state.at("allocated_kv_bytes") == allocated, "edits resized fixed KV allocation");
+        require(state.at("allocated_capacity_tokens") == initial.at("allocated_capacity_tokens"), "edits changed physical capacity");
+        require(state.at("resident_kv_bytes").is_null() && state.at("returned_to_os_bytes") == 0, "logical reuse claimed physical reclamation");
+        require(drift(baseline, state.at("logits")) < 1e-3f, "repeated translation and refill changed logits");
+        require(isolated.inspect() == isolated_before, "edits changed another session");
+    }
+    require(drift(baseline, append(isolated, tail).at("logits")) < 1e-5f, "edits changed another session's logits");
+}
+
+static void test_generation_capacity(llama_model * model, llama_context_params cp, size_t budget) {
+    common_kv_session session(model, cp, 5, budget);
+    append(session, {4, 5, 6});
+    const auto before = session.inspect();
+    bool rejected = false;
+    try { generate(session, {7}, 2); }
+    catch (const common_kv_error & e) { rejected = std::string(e.what()) == "invalid_tokens"; }
+    require(rejected, "generation failed to reserve maximum output");
+    require(session.inspect() == before, "rejected generation appended prompt delta");
+    const auto generated = generate(session, {7}, 1);
+    require(generated.at("revision") == before.at("revision").get<int>() + 1, "generation advanced revision more than once");
+    require(generated.at("occupied_tokens") == 5 && generated.at("reusable_tokens") == 0, "final generated token not retained");
+    const auto & output = generated.at("spans").back();
+    require(output.at("begin") == 4 && output.at("end") == 5, "wrong generated span boundaries");
+    require(generated.at("engine_position_max") == 4, "final generated token not decoded");
+    call(session, "kv.drop", {{"span", output.at("id")}});
+    const auto replay = append(session, generated.at("generated_tokens").get<std::vector<llama_token>>());
+    require(replay.at("occupied_tokens") == 5, "generated cell could not be reused");
+}
+
+static void test_batched_append(llama_model * model, llama_context_params cp, size_t budget) {
+    // Keep microbatches equal so quantized GEMV/GEMM differences do not mask wrapper errors.
+    cp.n_ubatch = 4;
+    common_kv_session reference(model, cp, 65, budget);
+    cp.n_batch = 8;
+    common_kv_session batched(model, cp, 65, budget);
+    std::vector<llama_token> tokens;
+    for (int i = 0; i < 65; ++i) tokens.push_back(4 + i % 17);
+    const auto expected = append(reference, tokens);
+    const auto actual = append(batched, tokens);
+    require(actual.at("revision") == 1 && actual.at("spans").size() == 1, "batching split one append mutation");
+    require(actual.at("occupied_tokens") == 65 && actual.at("engine_position_max") == 64, "batched append lost cells");
+    require(drift(expected.at("logits"), actual.at("logits")) < 1e-4f, "batched append changed logits");
+    call(batched, "kv.drop", {{"span", actual.at("spans")[0].at("id")}});
+    require(batched.inspect().at("engine_position_max") == -1, "drop left batched cells in attention");
+    require(drift(actual.at("logits"), append(batched, tokens).at("logits")) < 1e-5f, "batched refill changed logits");
+}
+
 int main(int argc, char ** argv) {
     if (argc != 3) return 2;
     llama_backend_init();
@@ -91,6 +176,9 @@ int main(int argc, char ** argv) {
         return 1;
     }
     try {
+        test_active_capacity(model.get(), cp, budget);
+        test_generation_capacity(model.get(), cp, budget);
+        test_batched_append(model.get(), cp, budget);
         auto scaled_cp = cp;
         scaled_cp.yarn_attn_factor = 1.1f;
         bool scaling_rejected = false;
