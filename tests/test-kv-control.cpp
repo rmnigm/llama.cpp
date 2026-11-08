@@ -167,8 +167,7 @@ int main(int argc, char ** argv) {
         call(shifted, "kv.reposition", {{"span", moving}, {"position", 0}});
         const auto repeated = append(shifted, {8, 9, 10});
         const float repeated_drift = drift(baseline, repeated.at("logits"));
-        std::fprintf(stderr, "shift drift %.9g, repeated drift %.9g, negative control %.9g\n", shift_drift, repeated_drift, unrotated_drift);
-        require(repeated_drift < 0.02f, "repeated quantized shift drift");
+        require(repeated_drift < 1e-3f, "repeated quantized shift drift");
         reject(shifted, "kv.reposition", {{"span", moving}, {"position", 20}}, "shift_limit");
 
         common_kv_session capacity(model.get(), cp, 256, budget);
