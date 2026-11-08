@@ -91,6 +91,13 @@ LLAMA_API ggml_backend_dev_t llama_model_get_device(const struct llama_model * m
 
 LLAMA_API llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * ctx);
 
+// Apply pending K-shifts synchronously. False means the caller must discard the context.
+LLAMA_API bool llama_memory_apply_updates(struct llama_context * ctx);
+
+// Conservative KV allocation bound for the direct-control subset, without allocating backend buffers.
+// False includes unsupported RoPE magnitude/scaling and invalid context parameters.
+LLAMA_API bool llama_kv_control_preflight(const struct llama_model * model, struct llama_context_params params, size_t * bytes);
+
 // the backend buffers that a state write of this memory would touch - empty caches report none
 LLAMA_API std::vector<ggml_backend_buffer_t> llama_memory_get_buffers(const llama_memory_t mem);
 

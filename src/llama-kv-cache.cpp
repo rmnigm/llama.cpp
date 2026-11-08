@@ -874,6 +874,8 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
         }
     }
 
+    if (!sc_info.empty()) updated = true;
+
     if (do_shift) {
         if (!get_can_shift()) {
             GGML_ABORT("The current KV cache / model configuration does not support K-shift");
@@ -892,14 +894,14 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
             auto * gf = build_graph_shift(res, lctx);
             if (!ggml_backend_sched_alloc_graph(sched, gf)) {
                 LLAMA_LOG_ERROR("%s: failed to allocate compute graph for K-shift\n", __func__);
-                return updated;
+                return false;
             }
 
             res->set_inputs(nullptr);
 
             if (lctx->graph_compute(gf, false) != GGML_STATUS_SUCCESS) {
                 LLAMA_LOG_ERROR("%s: failed to compute K-shift\n", __func__);
-                return updated;
+                return false;
             }
 
             updated = true;
@@ -910,6 +912,7 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
 
             cells.reset_shift();
         }
+        updated = true;
     }
 
     return updated;
@@ -2887,9 +2890,7 @@ bool llama_kv_cache_context::apply() {
 
     // no ubatches -> this is a KV cache update
     if (ubatches.empty()) {
-        kv->update(lctx, do_shift, sc_info);
-
-        return true;
+        return kv->update(lctx, do_shift, sc_info);
     }
 
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);

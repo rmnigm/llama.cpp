@@ -133,6 +133,7 @@ struct server_routes {
     server_http_context::handler_t get_metrics;
     server_http_context::handler_t get_slots;
     server_http_context::handler_t post_slots;
+    server_http_context::handler_t post_kv;
     server_http_context::handler_t get_props;
     server_http_context::handler_t post_props;
     server_http_context::handler_t post_infill;
@@ -168,6 +169,7 @@ private:
             const std::vector<raw_buffer> & files,
             task_response_type res_type,
             const common_chat_session & chat_session = {});
+    std::unique_ptr<server_res_generator> handle_kv(const server_http_req & req, const json & body, bool completion = false);
     std::unique_ptr<server_res_generator> handle_slots_save(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_restore(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_erase(const server_http_req &, int id_slot);

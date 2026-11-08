@@ -635,6 +635,9 @@ struct common_params {
     int32_t n_threads_http      = -1;    // number of threads to process HTTP requests (TODO: support threadpool)
     int32_t n_cache_reuse       = 0;     // min chunk size to reuse from the cache via KV shifting
     bool    cache_reuse_scr     = false;
+    bool    kv_control         = false;
+    int32_t kv_control_max_sessions = 4;
+    int32_t kv_control_max_mib  = 256;
     bool    cache_prompt        = true;  // whether to enable prompt caching
     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot

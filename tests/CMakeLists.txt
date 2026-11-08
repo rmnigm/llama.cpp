@@ -225,6 +225,34 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     # TODO: after `test-llama-archs` is refactored to not link internal symbols, we can move all related tests out of
     #       this branch and run them on all platforms
     llama_build(test-llama-archs.cpp)
+    llama_build(test-kv-control.cpp)
+    llama_test(test-llama-archs NAME test-generate-kv-models ARGS -s 42 -a "^(llama|qwen3|qwen35)$" -o "${CMAKE_CURRENT_BINARY_DIR}/kv-models")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/kv-models")
+    set_tests_properties(test-generate-kv-models PROPERTIES FIXTURES_SETUP generate-kv-models)
+    llama_test(test-kv-control NAME test-kv-unsupported
+        ARGS "${CMAKE_CURRENT_BINARY_DIR}/kv-models/qwen35-dense.gguf" unsupported)
+    set_tests_properties(test-kv-unsupported PROPERTIES FIXTURES_REQUIRED generate-kv-models)
+    if (LLAMA_BUILD_TOOLS)
+        llama_test(llama-quantize NAME test-quantize-kv-model
+            ARGS "${CMAKE_CURRENT_BINARY_DIR}/kv-models/qwen3-dense.gguf"
+                 "${CMAKE_CURRENT_BINARY_DIR}/kv-models/qwen3-q4_k_m.gguf" Q4_K_M)
+        set_tests_properties(test-quantize-kv-model PROPERTIES
+            FIXTURES_REQUIRED generate-kv-models FIXTURES_SETUP quantize-kv-model)
+        foreach(kv_type f16 q8_0)
+            llama_test(test-kv-control NAME test-kv-qwen3-q4_k_m-${kv_type}
+                ARGS "${CMAKE_CURRENT_BINARY_DIR}/kv-models/qwen3-q4_k_m.gguf" ${kv_type})
+            set_tests_properties(test-kv-qwen3-q4_k_m-${kv_type} PROPERTIES FIXTURES_REQUIRED quantize-kv-model)
+        endforeach()
+    endif()
+
+    foreach(arch llama qwen3)
+        foreach(kv_type f16 q8_0)
+            llama_test(test-kv-control NAME test-kv-${arch}-${kv_type}
+                ARGS "${CMAKE_CURRENT_BINARY_DIR}/kv-models/${arch}-dense.gguf" ${kv_type})
+            set_tests_properties(test-kv-${arch}-${kv_type} PROPERTIES FIXTURES_REQUIRED generate-kv-models)
+        endforeach()
+    endforeach()
+
 
     set(MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-models/")
     file(MAKE_DIRECTORY "${MODEL_DIR}")

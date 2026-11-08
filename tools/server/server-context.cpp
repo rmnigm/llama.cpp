@@ -1,3 +1,4 @@
+#include "server-kv.h"
 #include "server-context.h"
 #include "server-chat.h"
 #include "server-common.h"
@@ -992,6 +993,7 @@ private:
 
     // note: keep these alive - they determine the lifetime of the model, context, etc.
     common_init_result_ptr llama_init;
+    std::unique_ptr<server_kv_control> kv_control;
 
     llama_context * ctx_tgt = nullptr;
 
@@ -1048,6 +1050,7 @@ private:
     int64_t t_last_load_progress_ms = 0;
 
     void destroy() {
+        kv_control.reset();
         spec.reset();
         spec_init.reset();
 
@@ -2838,6 +2841,24 @@ private:
         }
 
         switch (task.type) {
+            case SERVER_TASK_TYPE_KV_CONTROL:
+                {
+                    auto res = std::make_unique<server_task_result_router>();
+                    res->id = task.id;
+                    if (!params_base.kv_control) {
+                        res->data = {{"error", "kv_control_disabled"}};
+                    } else if (mctx || !params_base.lora_adapters.empty() || !params_base.control_vectors.empty() || ctx_dft) {
+                        res->data = {{"error", "unsupported_configuration"}};
+                    } else {
+                        if (!kv_control) {
+                            kv_control = std::make_unique<server_kv_control>(model_tgt, common_context_params_to_llama(params_base),
+                                llama_n_ctx_seq(ctx_tgt), params_base.kv_control_max_sessions,
+                                size_t(params_base.kv_control_max_mib) * 1024 * 1024);
+                        }
+                        res->data = kv_control->execute(task.kv_request, task.params.sampling, task.kv_max_generate);
+                    }
+                    queue_results.send(std::move(res));
+                } break;
             case SERVER_TASK_TYPE_COMPLETION:
             case SERVER_TASK_TYPE_INFILL:
             case SERVER_TASK_TYPE_EMBEDDING:
@@ -5612,10 +5633,15 @@ void server_routes::init_routes() {
             TASK_RESPONSE_TYPE_NONE);
     };
 
+    this->post_kv = [this](const server_http_req & req) {
+        return handle_kv(req, json::parse(req.body));
+    };
+
     this->post_completions_oai = [this](const server_http_req & req) {
         auto res = create_response();
         std::vector<raw_buffer> files; // dummy
         const json body = json::parse(req.body);
+        if (body.contains("kv_control")) return handle_kv(req, body, true);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
@@ -5628,6 +5654,10 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files;
         json body = json::parse(req.body);
+        if (body.contains("kv_control")) {
+            res->error(format_error_response("Direct KV continuation requires /v1/completions with append-only token IDs", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
         common_chat_session session;
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
@@ -6087,6 +6117,92 @@ void server_routes::init_routes() {
         res->ok(result->to_json());
         return res;
     };
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_kv(const server_http_req & req, const json & body, bool completion) {
+    auto res = create_response();
+    auto fail = [&](const std::string & code) {
+        int status = 400;
+        if (code == "revision_conflict") status = 409;
+        if (code == "session_limit" || code == "kv_budget_exceeded") status = 429;
+        if (code == "kv_control_disabled") status = 403;
+        if (code == "engine_failure" || code == "session_poisoned") status = 500;
+        res->status = status;
+        res->data = json({{"error", {{"message", code}, {"type", "kv_control_error"}, {"code", code}}}}).dump();
+    };
+    try {
+        server_task task(SERVER_TASK_TYPE_KV_CONTROL);
+        task.id = res->rd.get_new_id();
+        task.kv_request = body;
+        if (!completion && body.contains("model")) {
+            body.at("model").get<std::string>();
+            task.kv_request.erase("model");
+        }
+        if (completion) {
+            for (const auto & item : body.items()) {
+                if (item.key() != "model" && item.key() != "prompt" && item.key() != "max_tokens" &&
+                    item.key() != "temperature" && item.key() != "top_p" && item.key() != "top_k" &&
+                    item.key() != "seed" && item.key() != "kv_control" && item.key() != "n" && item.key() != "stream") {
+                    throw common_kv_error("unsupported_request");
+                }
+            }
+            auto kv = body.at("kv_control");
+            if (!kv.is_object() || kv.at("mode").get<std::string>() != "append") throw common_kv_error("prompt_sync_required");
+            for (const auto & item : kv.items()) {
+                if (item.key() != "version" && item.key() != "session" && item.key() != "revision" && item.key() != "mode") {
+                    throw common_kv_error("invalid_request");
+                }
+            }
+            if ((body.contains("stream") && body.at("stream") != false) ||
+                (body.contains("n") && common_kv_integer(body.at("n")) != 1)) throw common_kv_error("unsupported_request");
+            const auto count = common_kv_integer(body.at("max_tokens"));
+            if (count < 1 || count > 4096) throw common_kv_error("invalid_request");
+            kv.erase("mode");
+            kv["op"] = "kv.generate";
+            kv["tokens"] = body.at("prompt");
+            task.kv_request = std::move(kv);
+            task.kv_max_generate = int32_t(count);
+            task.params.sampling = server_schema::eval_llama_cmpl_schema(ctx_server.vocab, params, meta->logit_bias_eog, body).sampling;
+        } else if (body.value("op", "") == "kv.generate") {
+            throw common_kv_error("unsupported_operation");
+        }
+        res->rd.post_task(std::move(task));
+        auto result = res->rd.next(req.should_stop);
+        if (!result) return res;
+        auto out = result->to_json();
+        if (out.contains("error")) {
+            fail(out.at("error").get<std::string>());
+            return res;
+        }
+        if (completion) {
+            const auto generated = out.at("generated_tokens");
+            const auto prompt_tokens = out.at("prompt_tokens").get<int64_t>();
+            json response = {
+                {"id", gen_chatcmplid()}, {"object", "text_completion"}, {"created", std::time(nullptr)},
+                {"model", meta->model_name},
+                {"choices", json::array({json{{"index", 0}, {"text", out.at("text")}, {"logprobs", nullptr},
+                                             {"finish_reason", out.at("finish_reason")}}})},
+                {"usage", {{"prompt_tokens", prompt_tokens}, {"completion_tokens", generated.size()},
+                            {"total_tokens", prompt_tokens + int64_t(generated.size())}}},
+                {"tokens", generated},
+                {"timings", {{"n_reused_prefix", 0}, {"n_reused_shift", 0}, {"n_spans_relocated", 0},
+                              {"n_prefilled", prompt_tokens}}}
+            };
+            out.erase("text");
+            out.erase("generated_tokens");
+            out.erase("finish_reason");
+            out.erase("prompt_tokens");
+            response["kv_control"] = std::move(out);
+            res->ok(response);
+        } else {
+            res->ok(out);
+        }
+    } catch (const common_kv_error & e) {
+        fail(e.what());
+    } catch (const std::exception &) {
+        fail("invalid_request");
+    }
+    return res;
 }
 
 std::unique_ptr<server_res_generator> server_routes::handle_slots_save(const server_http_req & req, int id_slot) {

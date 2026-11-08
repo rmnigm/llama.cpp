@@ -57,6 +57,8 @@ include(parsers/sources.cmake)
 
 add_library(${TARGET}
     ${LLAMA_CHAT_PARSERS_SOURCES}
+    kv-control.cpp
+    kv-control.h
     arg.cpp
     arg.h
     base64.hpp

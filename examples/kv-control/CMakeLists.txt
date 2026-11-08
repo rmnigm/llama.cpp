@@ -1,5 +1,4 @@
 set(TARGET llama-kv-control)
 add_executable(${TARGET} kv-control.cpp)
-target_include_directories(${TARGET} PRIVATE ../../src ../../vendor/nlohmann)
-target_link_libraries(${TARGET} PRIVATE llama ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PRIVATE llama-common ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

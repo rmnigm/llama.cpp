@@ -946,7 +946,7 @@ llama_memory_t llama_context::get_memory() const {
     return memory.get();
 }
 
-bool llama_context::memory_update(bool optimize) {
+bool llama_context::memory_update(bool optimize, bool strict) {
     if (!memory) {
         return false;
     }
@@ -967,6 +967,7 @@ bool llama_context::memory_update(bool optimize) {
             case LLAMA_MEMORY_STATUS_FAILED_COMPUTE:
                 {
                     LLAMA_LOG_ERROR("%s: failed to prepare memory update\n", __func__);
+                    if (strict) throw std::runtime_error("failed to prepare memory update");
                     return false;
                 }
         }
@@ -982,6 +983,7 @@ bool llama_context::memory_update(bool optimize) {
 
         if (!mctx->apply()) {
             LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
+            if (strict) throw std::runtime_error("failed to apply memory update");
         }
     }
 
@@ -1000,6 +1002,7 @@ bool llama_context::memory_update(bool optimize) {
         auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_max, mctx.get());
         if (!gf) {
             LLAMA_LOG_ERROR("%s: failed to reserve graph after the memory update\n", __func__);
+            if (strict) throw std::runtime_error("failed to reserve memory update graph");
         }
     }
 
@@ -4714,6 +4717,57 @@ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * c
     return ctx->memory_breakdown();
 }
 
+bool llama_memory_apply_updates(struct llama_context * ctx) {
+    try {
+        ctx->memory_update(false, true);
+        llama_synchronize(ctx);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
+}
+
+bool llama_kv_control_preflight(const llama_model * model, llama_context_params params, size_t * bytes) {
+    const auto & hp = model->hparams;
+    const auto scaling = params.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED ? hp.rope_scaling_type_train : params.rope_scaling_type;
+    const float magnitude = params.yarn_attn_factor < 0 ? hp.yarn_attn_factor : params.yarn_attn_factor;
+    const float extrapolation = params.yarn_ext_factor < 0 ? hp.yarn_ext_factor : params.yarn_ext_factor;
+    const float base = params.rope_freq_base == 0 ? hp.rope_freq_base_train : params.rope_freq_base;
+    const float scale = scaling == LLAMA_ROPE_SCALING_TYPE_NONE ? 1.0f :
+        (params.rope_freq_scale == 0 ? hp.rope_freq_scale_train : params.rope_freq_scale);
+    // K-shift must be a pure rotation, including cells with delta zero.
+    if ((model->arch != LLM_ARCH_LLAMA && model->arch != LLM_ARCH_QWEN3) ||
+        (scaling != LLAMA_ROPE_SCALING_TYPE_NONE && scaling != LLAMA_ROPE_SCALING_TYPE_LINEAR) ||
+        magnitude != 1.0f || hp.rope_attn_factor != 1.0f || !std::isfinite(extrapolation) || extrapolation > 0 ||
+        !std::isfinite(base) || base <= 0 || !std::isfinite(scale) || scale <= 0 ||
+        params.n_ctx == 0 || params.n_ctx > uint32_t(INT32_MAX) - 255 || params.ctx_other || params.moe_cache_size ||
+        (params.type_k != GGML_TYPE_F16 && params.type_k != GGML_TYPE_Q8_0) || params.type_k != params.type_v) {
+        return false;
+    }
+    const size_t cells = (size_t(params.n_ctx) + 255) / 256 * 256;
+    size_t total = 0;
+    // Tensor metadata only; no KV or compute buffers are allocated by this estimate.
+    ggml_context_ptr metadata(ggml_init({size_t(2) * hp.n_layer_all * ggml_tensor_overhead(), nullptr, true}));
+    if (!metadata) return false;
+    for (uint32_t il = 0; il < hp.n_layer_all; ++il) {
+        auto buft = params.offload_kqv ? ggml_backend_dev_buffer_type(model->dev_layer(il)) : ggml_backend_cpu_buffer_type();
+        const auto alignment = ggml_backend_buft_get_alignment(buft);
+        if (params.type_k == GGML_TYPE_Q8_0 &&
+            (hp.n_embd_head_k(il) % 32 || hp.n_embd_head_v(il) % 32)) return false;
+        for (const auto width : {hp.n_embd_k_gqa(il), hp.n_embd_v_gqa(il)}) {
+            if (!width || width % ggml_blck_size(params.type_k)) return false;
+            const auto row = ggml_row_size(params.type_k, width);
+            if (row > SIZE_MAX / cells) return false;
+            auto * tensor = ggml_new_tensor_2d(metadata.get(), params.type_k, width, cells);
+            const auto allocation = ggml_backend_buft_get_alloc_size(buft, tensor);
+            if (alignment > SIZE_MAX - allocation || total > SIZE_MAX - allocation - alignment) return false;
+            total += allocation + alignment;
+        }
+    }
+    *bytes = total;
+    return true;
 }

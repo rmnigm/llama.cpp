@@ -13,6 +13,7 @@
 
 
 enum server_task_type {
+    SERVER_TASK_TYPE_KV_CONTROL,
     SERVER_TASK_TYPE_COMPLETION,
     SERVER_TASK_TYPE_EMBEDDING,
     SERVER_TASK_TYPE_RERANK,
@@ -163,6 +164,8 @@ struct server_task {
     std::vector<raw_buffer> cli_files;
 
     server_task_type type;
+    json kv_request;
+    int32_t kv_max_generate = 0;
 
     // used by SERVER_TASK_TYPE_SLOT_SAVE, SERVER_TASK_TYPE_SLOT_RESTORE, SERVER_TASK_TYPE_SLOT_ERASE
     struct slot_action {

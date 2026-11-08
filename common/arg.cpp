@@ -3600,6 +3600,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_PROMPT"));
     add_opt(common_arg(
+        {"--kv-control"},
+        "enable isolated append-only direct KV sessions (experimental)",
+        [](common_params & params) { params.kv_control = true; }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kv-control-max-sessions"}, "N",
+        "maximum live direct KV contexts (default: 4, range: 1..64)",
+        [](common_params & params, int value) {
+            if (value < 1 || value > 64) throw std::invalid_argument("invalid KV session limit");
+            params.kv_control_max_sessions = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kv-control-max-mib"}, "N",
+        "aggregate allocated KV budget for direct sessions in MiB (default: 256, range: 1..65536)",
+        [](common_params & params, int value) {
+            if (value < 1 || value > 65536) throw std::invalid_argument("invalid KV byte budget");
+            params.kv_control_max_mib = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--cache-reuse"}, "N",
         string_format(
             "min chunk size to attempt reusing from the cache via KV shifting, requires prompt caching to be enabled (default: %d)\n"
